@@ -7,7 +7,7 @@
 import json
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
-from update_data import ROOT, update_once
+from update_data import ROOT, csv_path, eps_path, update_once
 
 HOST = "127.0.0.1"
 PORT = 8765
@@ -20,6 +20,24 @@ class Handler(SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        served = {
+            "/data/googl_daily.csv": (csv_path(), "text/csv; charset=utf-8"),
+            "/data/last_eps.json": (eps_path(), "application/json; charset=utf-8"),
+        }.get(path)
+        if served is None:
+            return super().do_GET()
+        file_path, content_type = served
+        if not file_path.is_file():
+            return super().do_GET()
+        body = file_path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]

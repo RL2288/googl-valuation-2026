@@ -442,6 +442,49 @@ async function reloadCsv() {
   document.body.classList.remove("has-update");
   renderAll();
 }
+function applyUpdate(data) {
+  const rows = Array.isArray(data.rows) ? data.rows : [];
+  let changed = false;
+  for (const row of rows) {
+    const price = Number(row.price);
+    const valuation = Number(row.valuation);
+    if (!row.date || !isFinite(price) || !isFinite(valuation)) continue;
+    if (DAILY.some((item) => item.date === row.date)) continue;
+    DAILY.push({ date: row.date, price, valuation });
+    changed = true;
+  }
+  if (changed) DAILY.sort((a, b) => (a.date < b.date ? -1 : 1));
+  if (!changed && data.valuationUpdated && DAILY.length && isFinite(Number(data.valuation))) {
+    DAILY[DAILY.length - 1].valuation = Number(data.valuation);
+    changed = true;
+  }
+  if (
+    !changed
+    && data.lastRow
+    && DAILY.length
+    && data.lastRow.date === DAILY[DAILY.length - 1].date
+    && isFinite(Number(data.lastRow.valuation))
+    && Number(data.lastRow.valuation) !== DAILY[DAILY.length - 1].valuation
+  ) {
+    DAILY[DAILY.length - 1].valuation = Number(data.lastRow.valuation);
+    if (isFinite(Number(data.lastRow.price))) {
+      DAILY[DAILY.length - 1].price = Number(data.lastRow.price);
+    }
+    changed = true;
+  }
+  if (changed) {
+    D = computeAll(DAILY, budgetNow());
+    const keepLocal = data.persisted === false || data.ephemeral === true;
+    dirty = keepLocal;
+    document.body.classList.toggle("has-update", keepLocal);
+    renderAll();
+  }
+  if (typeof data.nextEarnings === "string" && /^\d{4}-\d{2}-\d{2}$/.test(data.nextEarnings)) {
+    NEXT_EARN = data.nextEarnings;
+    renderEarnings(NEXT_EARN);
+  }
+  return changed;
+}
 async function pullLatest() {
   const btn = document.getElementById("btnUpdate");
   btn.disabled = true;
@@ -451,8 +494,8 @@ async function pullLatest() {
     let data = {};
     try { data = await res.json(); } catch { /* 非 JSON 回應 */ }
     if (!res.ok || !data.ok) throw new Error(data.message || `伺服器回應 ${res.status}`);
-    await reloadCsv();
-    await loadEarnings();
+    applyUpdate(data);
+    if (!(typeof data.nextEarnings === "string" && data.nextEarnings)) await loadEarnings();
     setBarStatus(data.message, "ok");
   } catch (err) {
     const offline = /Failed to fetch|NetworkError|Load failed/i.test(err.message);
