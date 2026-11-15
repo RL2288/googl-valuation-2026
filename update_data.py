@@ -7,18 +7,72 @@
     python update_data.py
 """
 import csv
+import errno
 import json
+import os
+import shutil
 import threading
 from datetime import date, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-CSV_PATH = ROOT / "data" / "googl_daily.csv"
-EPS_PATH = ROOT / "data" / "last_eps.json"
+BUNDLE_DATA = ROOT / "data"
 SYMBOL = "GOOGL"
 EPS_THRESHOLD = 0.01
 
 _lock = threading.Lock()
+_dir_lock = threading.Lock()
+_runtime_dir = None
+
+
+def _can_write(directory):
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        probe = directory / ".write_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _seed(directory):
+    for name in ("googl_daily.csv", "last_eps.json"):
+        dest = directory / name
+        src = BUNDLE_DATA / name
+        if not dest.exists() and src.exists():
+            shutil.copyfile(src, dest)
+
+
+def data_dir():
+    """部署目錄在上線環境是唯讀的（/var/task）。可寫就用原 data/，否則改寫 /tmp。"""
+    global _runtime_dir
+    with _dir_lock:
+        if _runtime_dir is not None:
+            return _runtime_dir
+        override = os.environ.get("GOOGL_DATA_DIR", "").strip()
+        if override:
+            path = Path(override)
+            path.mkdir(parents=True, exist_ok=True)
+            _seed(path)
+            _runtime_dir = path
+            return path
+        if _can_write(BUNDLE_DATA):
+            _runtime_dir = BUNDLE_DATA
+            return _runtime_dir
+        path = Path(os.environ.get("TMPDIR", "/tmp")) / "googl-valuation-data"
+        path.mkdir(parents=True, exist_ok=True)
+        _seed(path)
+        _runtime_dir = path
+        return path
+
+
+def csv_path():
+    return data_dir() / "googl_daily.csv"
+
+
+def eps_path():
+    return data_dir() / "last_eps.json"
 
 
 def update_once():
@@ -48,19 +102,30 @@ def _update_once():
     eps_changed = bool(prev and ttm and abs(ttm / prev - 1) > EPS_THRESHOLD)
     new_val = round(last_val * (ttm / prev), 4) if eps_changed else last_val
 
-    if bars:
-        _append_rows(bars, new_val)
-    elif eps_changed:
-        _replace_last_valuation(new_val)
-
-    if ttm or next_earn:
-        as_of = bars[-1][0] if bars else last_date
-        _save_eps(ttm, as_of, next_earn)
+    persisted = True
+    try:
+        if bars:
+            _append_rows(bars, new_val)
+        elif eps_changed:
+            _replace_last_valuation(new_val)
+        if ttm or next_earn:
+            as_of = bars[-1][0] if bars else last_date
+            _save_eps(ttm, as_of, next_earn)
+    except OSError as exc:
+        if exc.errno not in (errno.EROFS, errno.EACCES, errno.EPERM):
+            raise
+        persisted = False
 
     return {
         "ok": True,
         "message": _message(last_date, last_val, new_val, bars, prev, ttm, eps_changed, next_earn),
         "appended": [bar[0] for bar in bars],
+        "rows": [
+            {"date": day, "price": price, "valuation": new_val}
+            for day, price in bars
+        ],
+        "valuationUpdated": bool(eps_changed and not bars),
+        "persisted": persisted,
         "asof": bars[-1][0] if bars else last_date,
         "valuation": new_val,
         "ttmEps": ttm,
@@ -71,10 +136,11 @@ def _update_once():
 
 
 def _last_row():
-    if not CSV_PATH.exists():
-        raise FileNotFoundError(f"找不到 {CSV_PATH.name}")
+    path = csv_path()
+    if not path.exists():
+        raise FileNotFoundError(f"找不到 {path.name}")
     last = None
-    with CSV_PATH.open(newline="", encoding="utf-8") as handle:
+    with path.open(newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
             if row.get("date") and row.get("price") and row.get("valuation"):
                 last = row
@@ -138,10 +204,11 @@ def _next_earnings(ticker):
 
 
 def _read_eps_file():
-    if not EPS_PATH.exists():
+    path = eps_path()
+    if not path.exists():
         return {}
     try:
-        data = json.loads(EPS_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -161,7 +228,8 @@ def _save_eps(ttm, as_of, next_earnings):
     stored_earn = next_earnings or prev.get("nextEarnings")
     if stored_ttm is None and not stored_earn:
         return
-    EPS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    path = eps_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "symbol": SYMBOL,
         "ttmEps": stored_ttm,
@@ -169,7 +237,7 @@ def _save_eps(ttm, as_of, next_earnings):
         "nextEarnings": stored_earn,
         "source": "yfinance",
     }
-    EPS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _newline_style(text):
@@ -177,16 +245,18 @@ def _newline_style(text):
 
 
 def _append_rows(bars, valuation):
-    text = CSV_PATH.read_text(encoding="utf-8")
+    path = csv_path()
+    text = path.read_text(encoding="utf-8")
     newline = _newline_style(text)
     prefix = "" if text.endswith(("\n", "\r\n")) else newline
     body = newline.join(f"{day},{price:.2f},{valuation:.4f}" for day, price in bars)
-    with CSV_PATH.open("a", encoding="utf-8", newline="") as handle:
+    with path.open("a", encoding="utf-8", newline="") as handle:
         handle.write(prefix + body + newline)
 
 
 def _replace_last_valuation(valuation):
-    text = CSV_PATH.read_text(encoding="utf-8")
+    path = csv_path()
+    text = path.read_text(encoding="utf-8")
     newline = _newline_style(text)
     lines = text.splitlines()
     idx = len(lines) - 1
@@ -198,7 +268,7 @@ def _replace_last_valuation(valuation):
     parts[2] = f"{valuation:.4f}"
     lines[idx] = ",".join(parts)
     ending = newline if text.endswith(("\n", "\r\n")) else ""
-    CSV_PATH.write_text(newline.join(lines) + ending, encoding="utf-8")
+    path.write_text(newline.join(lines) + ending, encoding="utf-8")
 
 
 def _message(last_date, last_val, new_val, bars, prev, ttm, eps_changed, next_earn):
