@@ -576,6 +576,8 @@ async function unlockWithPin(pin) {
   });
   let data = {};
   try { data = await res.json(); } catch { /* ignore */ }
+  if (res.status === 503) throw new Error(data.message || "伺服器未設定存取 PIN");
+  if (res.status === 429) throw new Error(data.message || "嘗試次數過多，請稍後再試");
   if (!res.ok || !data.ok) throw new Error(data.message || "PIN 不正確");
   accessPin = pin;
   sessionStorage.setItem("googl_pin", pin);

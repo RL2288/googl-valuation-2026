@@ -33,7 +33,7 @@ python server.py
 - 「手動輸入」只補一日收市價，唔會呼叫 yfinance
 - 「下載 CSV」把目前數據存到電腦
 - 上線環境若 `data/` 唯讀（例如 `/var/task`）：改寫暫存目錄，並把今次新列回傳畀頁面套用；要留底就撳「下載 CSV」。可用環境變數 `GOOGL_DATA_DIR` 指定可寫目錄。
-- 頁面同 `/api/update`、數據檔需要 PIN（環境變數 `GOOGL_ACCESS_PIN`；本機預設 `1211`）。
+- 頁面同 `/api/update`、數據檔需要 PIN。必須設定環境變數 `GOOGL_ACCESS_PIN`（未設定會拒絕解鎖／讀數據／更新）。
 
 唔開頁面也可以只更新一次：
 
