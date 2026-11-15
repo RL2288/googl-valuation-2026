@@ -458,10 +458,25 @@ function applyUpdate(data) {
     DAILY[DAILY.length - 1].valuation = Number(data.valuation);
     changed = true;
   }
+  if (
+    !changed
+    && data.lastRow
+    && DAILY.length
+    && data.lastRow.date === DAILY[DAILY.length - 1].date
+    && isFinite(Number(data.lastRow.valuation))
+    && Number(data.lastRow.valuation) !== DAILY[DAILY.length - 1].valuation
+  ) {
+    DAILY[DAILY.length - 1].valuation = Number(data.lastRow.valuation);
+    if (isFinite(Number(data.lastRow.price))) {
+      DAILY[DAILY.length - 1].price = Number(data.lastRow.price);
+    }
+    changed = true;
+  }
   if (changed) {
     D = computeAll(DAILY, budgetNow());
-    dirty = false;
-    document.body.classList.remove("has-update");
+    const keepLocal = data.persisted === false || data.ephemeral === true;
+    dirty = keepLocal;
+    document.body.classList.toggle("has-update", keepLocal);
     renderAll();
   }
   if (typeof data.nextEarnings === "string" && /^\d{4}-\d{2}-\d{2}$/.test(data.nextEarnings)) {

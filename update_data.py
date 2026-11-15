@@ -4,10 +4,14 @@
 非業績期 valuation 沿用上一行。trailingEps 相對 data/last_eps.json
 變動超過 1% 才按比率調整估值。同一日不會重複新增。
 
+上線環境（例如 /var/task）資料目錄可能唯讀：可寫時寫入 data/，
+否則改寫暫存目錄；連暫存都寫不入時仍回傳今次擷取結果畀前端套用。
+
     python update_data.py
 """
 import csv
 import errno
+import io
 import json
 import os
 import shutil
@@ -19,10 +23,12 @@ ROOT = Path(__file__).resolve().parent
 BUNDLE_DATA = ROOT / "data"
 SYMBOL = "GOOGL"
 EPS_THRESHOLD = 0.01
+WRITE_ERRNOS = {errno.EROFS, errno.EACCES, errno.EPERM, errno.ENOENT}
 
 _lock = threading.Lock()
 _dir_lock = threading.Lock()
 _runtime_dir = None
+_ephemeral = False
 
 
 def _can_write(directory):
@@ -44,9 +50,17 @@ def _seed(directory):
             shutil.copyfile(src, dest)
 
 
+def _looks_like_readonly_bundle():
+    """Cursor / Lambda 等會把程式放喺 /var/task，成個 bundle 唯讀。"""
+    try:
+        return ROOT.resolve().as_posix().startswith("/var/task")
+    except OSError:
+        return False
+
+
 def data_dir():
-    """部署目錄在上線環境是唯讀的（/var/task）。可寫就用原 data/，否則改寫 /tmp。"""
-    global _runtime_dir
+    """可寫就用原 data/；上線唯讀時改用暫存（可用 GOOGL_DATA_DIR 覆寫）。"""
+    global _runtime_dir, _ephemeral
     with _dir_lock:
         if _runtime_dir is not None:
             return _runtime_dir
@@ -56,14 +70,17 @@ def data_dir():
             path.mkdir(parents=True, exist_ok=True)
             _seed(path)
             _runtime_dir = path
+            _ephemeral = path.resolve() != BUNDLE_DATA.resolve()
             return path
-        if _can_write(BUNDLE_DATA):
+        if not _looks_like_readonly_bundle() and _can_write(BUNDLE_DATA):
             _runtime_dir = BUNDLE_DATA
+            _ephemeral = False
             return _runtime_dir
-        path = Path(os.environ.get("TMPDIR", "/tmp")) / "googl-valuation-data"
+        path = Path(os.environ.get("TMPDIR") or os.environ.get("TMP") or "/tmp") / "googl-valuation-data"
         path.mkdir(parents=True, exist_ok=True)
         _seed(path)
         _runtime_dir = path
+        _ephemeral = True
         return path
 
 
@@ -73,6 +90,11 @@ def csv_path():
 
 def eps_path():
     return data_dir() / "last_eps.json"
+
+
+def is_ephemeral():
+    data_dir()
+    return _ephemeral
 
 
 def update_once():
@@ -86,9 +108,14 @@ def update_once():
 
 def _update_once():
     try:
-        last_date, last_val = _last_row()
+        rows = _load_rows()
     except (FileNotFoundError, ValueError) as exc:
         return {"ok": False, "message": str(exc)}
+    if not rows:
+        return {"ok": False, "message": "CSV 沒有可用的數據列"}
+
+    last_date = rows[-1]["date"]
+    last_val = rows[-1]["valuation"]
     start = (date.fromisoformat(last_date) + timedelta(days=1)).isoformat()
     try:
         bars, ttm, next_earn = _fetch(start)
@@ -102,51 +129,101 @@ def _update_once():
     eps_changed = bool(prev and ttm and abs(ttm / prev - 1) > EPS_THRESHOLD)
     new_val = round(last_val * (ttm / prev), 4) if eps_changed else last_val
 
-    persisted = True
-    try:
-        if bars:
-            _append_rows(bars, new_val)
-        elif eps_changed:
-            _replace_last_valuation(new_val)
-        if ttm or next_earn:
-            as_of = bars[-1][0] if bars else last_date
-            _save_eps(ttm, as_of, next_earn)
-    except OSError as exc:
-        if exc.errno not in (errno.EROFS, errno.EACCES, errno.EPERM):
-            raise
-        persisted = False
+    new_rows = [
+        {"date": day, "price": price, "valuation": new_val}
+        for day, price in bars
+    ]
+    if bars:
+        rows.extend(new_rows)
+    elif eps_changed:
+        rows[-1] = {**rows[-1], "valuation": new_val}
+
+    as_of = bars[-1][0] if bars else last_date
+    persisted = _persist(rows, ttm, as_of, next_earn)
+    ephemeral = is_ephemeral()
+    message = _message(last_date, last_val, new_val, bars, prev, ttm, eps_changed, next_earn)
+    if (bars or eps_changed) and (not persisted or ephemeral):
+        message += "部署目錄唯讀，今次結果已回傳畫面；若要留底請撳「下載 CSV」。"
 
     return {
         "ok": True,
-        "message": _message(last_date, last_val, new_val, bars, prev, ttm, eps_changed, next_earn),
+        "message": message,
         "appended": [bar[0] for bar in bars],
-        "rows": [
-            {"date": day, "price": price, "valuation": new_val}
-            for day, price in bars
-        ],
+        "rows": new_rows,
         "valuationUpdated": bool(eps_changed and not bars),
         "persisted": persisted,
-        "asof": bars[-1][0] if bars else last_date,
+        "ephemeral": ephemeral,
+        "asof": as_of,
         "valuation": new_val,
         "ttmEps": ttm,
         "prevTtmEps": prev,
         "epsChanged": eps_changed,
         "nextEarnings": next_earn,
+        "lastRow": rows[-1],
     }
 
 
-def _last_row():
-    path = csv_path()
+def _bundle_or_runtime(name):
+    runtime = data_dir() / name
+    if runtime.is_file():
+        return runtime
+    bundled = BUNDLE_DATA / name
+    if bundled.is_file():
+        return bundled
+    return runtime
+
+
+def _load_rows():
+    path = _bundle_or_runtime("googl_daily.csv")
     if not path.exists():
         raise FileNotFoundError(f"找不到 {path.name}")
-    last = None
+    rows = []
     with path.open(newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
-            if row.get("date") and row.get("price") and row.get("valuation"):
-                last = row
-    if last is None:
-        raise ValueError("CSV 沒有可用的數據列")
-    return last["date"].strip(), float(last["valuation"])
+            if not (row.get("date") and row.get("price") and row.get("valuation")):
+                continue
+            try:
+                rows.append(
+                    {
+                        "date": row["date"].strip(),
+                        "price": float(row["price"]),
+                        "valuation": float(row["valuation"]),
+                    }
+                )
+            except ValueError:
+                continue
+    rows.sort(key=lambda item: item["date"])
+    return rows
+
+
+def _rows_to_csv(rows):
+    buf = io.StringIO(newline="")
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(["date", "price", "valuation"])
+    for row in rows:
+        writer.writerow(
+            [
+                row["date"],
+                f"{float(row['price']):.2f}",
+                f"{float(row['valuation']):.4f}",
+            ]
+        )
+    return buf.getvalue()
+
+
+def _persist(rows, ttm, as_of, next_earn):
+    try:
+        path = csv_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_rows_to_csv(rows), encoding="utf-8")
+        if ttm or next_earn:
+            _save_eps(ttm, as_of, next_earn)
+        return True
+    except OSError as exc:
+        if exc.errno in WRITE_ERRNOS or getattr(exc, "errno", None) is None:
+            return False
+        # 其他 I/O 錯誤都唔阻礙前端套用今次結果
+        return False
 
 
 def _fetch(start):
@@ -204,7 +281,7 @@ def _next_earnings(ticker):
 
 
 def _read_eps_file():
-    path = eps_path()
+    path = _bundle_or_runtime("last_eps.json")
     if not path.exists():
         return {}
     try:
@@ -238,37 +315,6 @@ def _save_eps(ttm, as_of, next_earnings):
         "source": "yfinance",
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def _newline_style(text):
-    return "\r\n" if "\r\n" in text else "\n"
-
-
-def _append_rows(bars, valuation):
-    path = csv_path()
-    text = path.read_text(encoding="utf-8")
-    newline = _newline_style(text)
-    prefix = "" if text.endswith(("\n", "\r\n")) else newline
-    body = newline.join(f"{day},{price:.2f},{valuation:.4f}" for day, price in bars)
-    with path.open("a", encoding="utf-8", newline="") as handle:
-        handle.write(prefix + body + newline)
-
-
-def _replace_last_valuation(valuation):
-    path = csv_path()
-    text = path.read_text(encoding="utf-8")
-    newline = _newline_style(text)
-    lines = text.splitlines()
-    idx = len(lines) - 1
-    while idx >= 0 and not lines[idx].strip():
-        idx -= 1
-    parts = lines[idx].split(",")
-    if len(parts) < 3:
-        raise ValueError("最後一行 CSV 格式不正確")
-    parts[2] = f"{valuation:.4f}"
-    lines[idx] = ",".join(parts)
-    ending = newline if text.endswith(("\n", "\r\n")) else ""
-    path.write_text(newline.join(lines) + ending, encoding="utf-8")
 
 
 def _message(last_date, last_val, new_val, bars, prev, ttm, eps_changed, next_earn):
