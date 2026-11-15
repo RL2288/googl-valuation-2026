@@ -16,8 +16,20 @@ let D = null;                 // 計算結果
 let DAILY = [];               // 每日原始 rows {date,price,valuation}
 let CH = {};                  // Chart instances
 let dirty = false;            // 手動新增但未下載 CSV
+let accessPin = sessionStorage.getItem("googl_pin") || "";
 const fmt$ = (v) => "$" + Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtPct = (v, d = 1) => (v > 0 ? "+" : "") + Number(v).toFixed(d) + "%";
+
+function authHeaders(extra = {}) {
+  const headers = { ...extra };
+  if (accessPin) headers["X-Access-Pin"] = accessPin;
+  return headers;
+}
+function authFetch(url, options = {}) {
+  const next = { credentials: "include", ...options };
+  next.headers = authHeaders(options.headers || {});
+  return fetch(url, next);
+}
 
 Chart.defaults.color = C.dim;
 Chart.defaults.font.family = NT;
@@ -182,7 +194,7 @@ function renderEarnings(iso) {
 }
 async function loadEarnings() {
   try {
-    const res = await fetch("data/last_eps.json", { cache: "no-store" });
+    const res = await authFetch("data/last_eps.json", { cache: "no-store" });
     if (!res.ok) throw new Error("missing");
     const data = await res.json();
     NEXT_EARN = typeof data.nextEarnings === "string" ? data.nextEarnings : null;
@@ -434,8 +446,8 @@ function applyRow(dateStr, price) {
   return true;
 }
 async function reloadCsv() {
-  const csvRes = await fetch("data/googl_daily.csv", { cache: "no-store" });
-  if (!csvRes.ok) throw new Error("CSV 重新載入失敗");
+  const csvRes = await authFetch("data/googl_daily.csv", { cache: "no-store" });
+  if (!csvRes.ok) throw new Error(csvRes.status === 401 ? "PIN 已失效，請重新解鎖" : "CSV 重新載入失敗");
   DAILY = parseCSV(await csvRes.text());
   D = computeAll(DAILY, budgetNow());
   dirty = false;
@@ -490,9 +502,10 @@ async function pullLatest() {
   btn.disabled = true;
   setBarStatus("正在向 yfinance 擷取最新數據…");
   try {
-    const res = await fetch("/api/update", { method: "POST", cache: "no-store" });
+    const res = await authFetch("/api/update", { method: "POST", cache: "no-store" });
     let data = {};
     try { data = await res.json(); } catch { /* 非 JSON 回應 */ }
+    if (res.status === 401) throw new Error(data.message || "需要 PIN 先可更新數據");
     if (!res.ok || !data.ok) throw new Error(data.message || `伺服器回應 ${res.status}`);
     applyUpdate(data);
     if (!(typeof data.nextEarnings === "string" && data.nextEarnings)) await loadEarnings();
@@ -534,17 +547,94 @@ function renderAll() {
   renderTables();
 }
 
+function showApp() {
+  document.body.classList.remove("locked");
+  const gate = document.getElementById("pinGate");
+  const shell = document.getElementById("appShell");
+  if (gate) gate.hidden = true;
+  if (shell) shell.hidden = false;
+}
+
+function showPinGate(message) {
+  document.body.classList.add("locked");
+  const gate = document.getElementById("pinGate");
+  const shell = document.getElementById("appShell");
+  if (gate) gate.hidden = false;
+  if (shell) shell.hidden = true;
+  const status = document.getElementById("pinStatus");
+  if (status && message) {
+    status.textContent = message;
+    status.className = "pin-status";
+  }
+}
+
+async function unlockWithPin(pin) {
+  const res = await authFetch("/api/unlock", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pin }),
+  });
+  let data = {};
+  try { data = await res.json(); } catch { /* ignore */ }
+  if (!res.ok || !data.ok) throw new Error(data.message || "PIN 不正確");
+  accessPin = pin;
+  sessionStorage.setItem("googl_pin", pin);
+  return data;
+}
+
 async function boot() {
   try {
-    const res = await fetch("data/googl_daily.csv", { cache: "no-store" });
+    const res = await authFetch("data/googl_daily.csv", { cache: "no-store" });
+    if (res.status === 401) throw new Error("PIN_REQUIRED");
     if (!res.ok) throw new Error("讀不到 CSV（" + res.status + "）");
     DAILY = parseCSV(await res.text());
     D = computeAll(DAILY, budgetNow());
+    showApp();
     renderAll();
     await loadEarnings();
   } catch (err) {
+    if (err.message === "PIN_REQUIRED") {
+      showPinGate(accessPin ? "PIN 已失效，請重新輸入" : "");
+      return;
+    }
     setBarStatus("頁面啟動失敗：" + err.message, "err");
+    showApp();
   }
+}
+
+async function start() {
+  const form = document.getElementById("pinForm");
+  const input = document.getElementById("pinInput");
+  const status = document.getElementById("pinStatus");
+  if (form) {
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const pin = (input.value || "").trim();
+      status.textContent = "核對中…";
+      status.className = "pin-status";
+      try {
+        await unlockWithPin(pin);
+        status.textContent = "已解鎖";
+        status.className = "pin-status ok";
+        input.value = "";
+        await boot();
+      } catch (err) {
+        status.textContent = err.message || "PIN 不正確";
+        status.className = "pin-status";
+      }
+    });
+  }
+  if (accessPin) {
+    try {
+      await unlockWithPin(accessPin);
+      await boot();
+      return;
+    } catch {
+      sessionStorage.removeItem("googl_pin");
+      accessPin = "";
+    }
+  }
+  showPinGate("");
 }
 
 document.getElementById("csvFile").addEventListener("change", (e) => {
@@ -573,4 +663,4 @@ window.addEventListener("beforeunload", (e) => {
   if (dirty) { e.preventDefault(); e.returnValue = ""; }
 });
 
-boot();
+start();
