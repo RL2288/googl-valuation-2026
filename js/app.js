@@ -228,35 +228,65 @@ function chart1() {
   });
 }
 
-/* 第二課:gap 時間序列 + p25/p75 */
+/* 第二課:gap 時間序列 + p25/p75（可選 overlay 月度股價） */
+const GAP_PRICE_KEY = "googl_gap_show_price";
+function showGapPrice() {
+  const el = document.getElementById("toggleGapPrice");
+  return !!(el && el.checked);
+}
 function chart2() {
   destroy("c2");
+  const withPrice = showGapPrice();
+  const priceLegend = document.getElementById("gapPriceLegend");
+  if (priceLegend) priceLegend.hidden = !withPrice;
+
+  const datasets = [
+    {
+      label: "gap %", data: D.monthly.gap, yAxisID: "y", borderWidth: 1.6, pointRadius: 0, tension: 0.2,
+      segment: { borderColor: (c) => (c.p1.parsed.y >= 0 ? C.green : C.red) },
+      fill: { target: "origin", above: "rgba(63,178,127,.14)", below: "rgba(229,83,75,.14)" },
+    },
+    { label: "p75", data: D.monthly.dates.map(() => D.bands.p75), yAxisID: "y", borderColor: C.faint, borderDash: [5, 4], borderWidth: 1, pointRadius: 0 },
+    { label: "p25", data: D.monthly.dates.map(() => D.bands.p25), yAxisID: "y", borderColor: C.faint, borderDash: [5, 4], borderWidth: 1, pointRadius: 0 },
+  ];
+  if (withPrice) {
+    datasets.push({
+      label: "股價 Price", data: D.monthly.price, yAxisID: "yPrice",
+      borderColor: C.price, borderWidth: 1.5, pointRadius: 0, tension: 0.15,
+    });
+  }
+
   CH.c2 = new Chart(document.getElementById("c2"), {
     type: "line",
-    data: {
-      labels: D.monthly.dates,
-      datasets: [
-        {
-          label: "gap %", data: D.monthly.gap, borderWidth: 1.6, pointRadius: 0, tension: 0.2,
-          segment: { borderColor: (c) => (c.p1.parsed.y >= 0 ? C.green : C.red) },
-          fill: { target: "origin", above: "rgba(63,178,127,.14)", below: "rgba(229,83,75,.14)" },
-        },
-        { label: "p75", data: D.monthly.dates.map(() => D.bands.p75), borderColor: C.faint, borderDash: [5, 4], borderWidth: 1, pointRadius: 0 },
-        { label: "p25", data: D.monthly.dates.map(() => D.bands.p25), borderColor: C.faint, borderDash: [5, 4], borderWidth: 1, pointRadius: 0 },
-      ],
-    },
+    data: { labels: D.monthly.dates, datasets },
     options: {
       responsive: true, maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
       scales: {
         x: { ticks: X_TICKS, grid: { display: false } },
-        y: { ticks: { font: { family: MONO, size: 10.5 }, callback: (v) => v + "%" } },
+        y: {
+          position: "left",
+          ticks: { font: { family: MONO, size: 10.5 }, callback: (v) => v + "%" },
+          title: withPrice ? { display: true, text: "gap %", color: C.dim, font: { size: 11 } } : undefined,
+        },
+        yPrice: {
+          display: withPrice,
+          position: "right",
+          grid: { drawOnChartArea: false },
+          ticks: { font: { family: MONO, size: 10.5 }, callback: (v) => "$" + v },
+          title: withPrice ? { display: true, text: "Price USD", color: C.dim, font: { size: 11 } } : undefined,
+        },
       },
       plugins: {
         legend: { display: false },
         tooltip: {
           backgroundColor: "#1c2330", borderColor: "#2b323d", borderWidth: 1, titleFont: { family: MONO },
-          filter: (t) => t.dataset.label === "gap %",
-          callbacks: { label: (c) => `gap: ${fmtPct(c.parsed.y, 1)} · 分層 Q${D.monthly.tiers[c.dataIndex]}` },
+          filter: (t) => t.dataset.label === "gap %" || t.dataset.label === "股價 Price",
+          callbacks: {
+            label: (c) => {
+              if (c.dataset.label === "股價 Price") return `股價: ${fmt$(c.parsed.y)}`;
+              return `gap: ${fmtPct(c.parsed.y, 1)} · 分層 Q${D.monthly.tiers[c.dataIndex]}`;
+            },
+          },
         },
       },
     },
@@ -525,6 +555,15 @@ document.getElementById("btnManual").addEventListener("click", () => {
   }
 });
 document.getElementById("btnCsv").addEventListener("click", downloadCSV);
+
+const gapPriceToggle = document.getElementById("toggleGapPrice");
+if (gapPriceToggle) {
+  gapPriceToggle.checked = localStorage.getItem(GAP_PRICE_KEY) === "1";
+  gapPriceToggle.addEventListener("change", () => {
+    localStorage.setItem(GAP_PRICE_KEY, gapPriceToggle.checked ? "1" : "0");
+    if (D) chart2();
+  });
+}
 
 /* ---------- 啟動 ---------- */
 function renderAll() {
