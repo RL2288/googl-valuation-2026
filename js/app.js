@@ -1,6 +1,6 @@
-/* GOOGL 估值回測儀表板 — app.js
- * 讀 data/googl_daily.csv → 四張圖 + KPI + 兩張表 + DCA 模擬
- * 「擷取最新數據」每次撳一下先 POST /api/update（server.py + yfinance）
+/* 估值回測儀表板 — app.js
+ * Watchlist（GOOGL / MSFT / AVGO）→ 點選一隻睇四課
+ * 「擷取最新數據」POST /api/update {symbol}（server.py + yfinance）
  */
 "use strict";
 
@@ -12,12 +12,48 @@ const C = {
   gold: "#c9a227", blue: "#4c8dff",
 };
 
-let D = null;                 // 計算結果
-let DAILY = [];               // 每日原始 rows {date,price,valuation}
+const DEFAULT_TICKERS = ["GOOGL", "MSFT", "AVGO"];
+let TICKERS = [...DEFAULT_TICKERS];
+let ACTIVE = null;
+/** @type {Record<string,{daily:any[],D:any,nextEarn:string|null,dirty:boolean}>} */
+const STORE = {};
+let D = null;                 // 當前 ticker 計算結果
+let DAILY = [];               // 當前 ticker 每日 rows
 let CH = {};                  // Chart instances
-let dirty = false;            // 手動新增但未下載 CSV
+let dirty = false;            // 當前 ticker 未下載 CSV
+let NEXT_EARN = null;
 const fmt$ = (v) => "$" + Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtPct = (v, d = 1) => (v > 0 ? "+" : "") + Number(v).toFixed(d) + "%";
+
+function csvUrl(sym) { return `data/${String(sym).toLowerCase()}_daily.csv`; }
+function epsUrl(sym) {
+  return String(sym).toUpperCase() === "GOOGL" ? "data/last_eps.json" : `data/${String(sym).toLowerCase()}_eps.json`;
+}
+function ensureSlot(sym) {
+  const s = String(sym).toUpperCase();
+  if (!STORE[s]) STORE[s] = { daily: [], D: null, nextEarn: null, dirty: false };
+  return STORE[s];
+}
+function stashActive() {
+  if (!ACTIVE) return;
+  const s = ensureSlot(ACTIVE);
+  s.daily = DAILY;
+  s.D = D;
+  s.nextEarn = NEXT_EARN;
+  s.dirty = dirty;
+}
+function adoptActive(sym) {
+  if (ACTIVE) stashActive();
+  ACTIVE = String(sym).toUpperCase();
+  const s = ensureSlot(ACTIVE);
+  DAILY = s.daily;
+  D = s.D;
+  NEXT_EARN = s.nextEarn;
+  dirty = s.dirty;
+  document.body.classList.toggle("has-update", dirty);
+  const title = document.getElementById("brandTitle");
+  if (title) title.textContent = `${ACTIVE} 估值回測儀表板`;
+}
 
 Chart.defaults.color = C.dim;
 Chart.defaults.font.family = NT;
@@ -160,7 +196,6 @@ function renderKPI() {
     `數據範圍 ${D.start} → ${D.asof} · ${D.nDays.toLocaleString()} 個交易日 · ${D.months} 個月 · 上次重算 ${new Date().toISOString().slice(0, 10)}`;
 }
 
-let NEXT_EARN = null;
 function renderEarnings(iso) {
   const value = document.getElementById("kEarn");
   const note = document.getElementById("kEarnNote");
@@ -180,16 +215,52 @@ function renderEarnings(iso) {
   else if (days === 0) note.textContent = "今日公布 · yfinance";
   else note.textContent = "日期已過，請再擷取";
 }
-async function loadEarnings() {
+async function loadEarnings(sym = ACTIVE) {
+  const slot = ensureSlot(sym);
   try {
-    const res = await fetch("data/last_eps.json", { cache: "no-store" });
+    const res = await fetch(epsUrl(sym), { cache: "no-store" });
     if (!res.ok) throw new Error("missing");
     const data = await res.json();
-    NEXT_EARN = typeof data.nextEarnings === "string" ? data.nextEarnings : null;
+    slot.nextEarn = typeof data.nextEarnings === "string" ? data.nextEarnings : null;
   } catch {
-    NEXT_EARN = null;
+    slot.nextEarn = null;
   }
-  renderEarnings(NEXT_EARN);
+  if (sym === ACTIVE) {
+    NEXT_EARN = slot.nextEarn;
+    renderEarnings(NEXT_EARN);
+  }
+}
+
+function renderWatchlist() {
+  const root = document.getElementById("watchlist");
+  if (!root) return;
+  root.innerHTML = TICKERS.map((sym) => {
+    const slot = ensureSlot(sym);
+    const k = slot.D && slot.D.kpi;
+    const gap = k ? k.gapPct : null;
+    const gapCls = gap == null ? "" : gap >= 0 ? "pos" : "neg";
+    const gapTxt = gap == null ? "—" : fmtPct(gap, 1);
+    const priceTxt = k ? fmt$(k.price) : "—";
+    const tierTxt = k ? `Q${k.tier}` : "—";
+    const asof = slot.D ? slot.D.asof : "—";
+    const active = sym === ACTIVE ? " active" : "";
+    return `<button type="button" class="wl-card${active}" data-symbol="${sym}" data-testid="watch-${sym}">
+      <div class="wl-top"><span class="wl-sym">${sym}</span><span class="wl-tier">${tierTxt}</span></div>
+      <div class="wl-price">${priceTxt}</div>
+      <div class="wl-gap ${gapCls}">gap ${gapTxt}</div>
+      <div class="wl-note">截至 ${asof}</div>
+    </button>`;
+  }).join("");
+  root.querySelectorAll(".wl-card").forEach((btn) => {
+    btn.addEventListener("click", () => selectTicker(btn.getAttribute("data-symbol")));
+  });
+}
+
+function selectTicker(sym) {
+  if (!sym || !STORE[sym] || !STORE[sym].D) return;
+  if (sym === ACTIVE) return;
+  adoptActive(sym);
+  renderAll();
 }
 
 /* ---------- 圖表共用 ---------- */
@@ -423,15 +494,16 @@ function renderTables() {
 
 /* ---------- 下載 CSV (更新後嘅新基準數據) ---------- */
 function downloadCSV() {
-  const csv = "date,price,valuation\n" + DAILY.map((r) => `${r.date},${Number(r.price).toFixed(2)},${Number(r.valuation).toFixed(2)}`).join("\n");
+  const csv = "date,price,valuation\n" + DAILY.map((r) => `${r.date},${Number(r.price).toFixed(2)},${Number(r.valuation).toFixed(4)}`).join("\n");
   const blob = new Blob([csv], { type: "text/csv" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = `googl_daily_${D.asof}.csv`;
+  a.download = `${ACTIVE.toLowerCase()}_daily_${D.asof}.csv`;
   a.click();
   URL.revokeObjectURL(a.href);
   dirty = false;
-  document.getElementById("updateStatus").textContent = `已下載基準 CSV（截至 ${D.asof}）`;
+  stashActive();
+  document.getElementById("updateStatus").textContent = `已下載 ${ACTIVE} 基準 CSV（截至 ${D.asof}）`;
 }
 
 /* ---------- 更新今日數據 ---------- */
@@ -455,24 +527,42 @@ function applyRow(dateStr, price) {
   const last = DAILY[DAILY.length - 1];
   if (DAILY.some((r) => r.date === dateStr)) { setStatus(`${dateStr} 已經喺數據入面,無需新增`, ""); return false; }
   if (dateStr <= last.date) throw new Error(`日期 ${dateStr} 早過最新數據 ${last.date}`);
-  DAILY.push({ date: dateStr, price: Math.round(price * 100) / 100, valuation: Math.round(last.valuation * 100) / 100 });
+  DAILY.push({ date: dateStr, price: Math.round(price * 100) / 100, valuation: Math.round(last.valuation * 10000) / 10000 });
   D = computeAll(DAILY, budgetNow());
-  renderAll();
   dirty = true;
+  stashActive();
   document.body.classList.add("has-update");
-  setBarStatus(`已手動新增 ${dateStr}（未寫入 CSV）· 記得撳「下載 CSV」`);
+  renderWatchlist();
+  renderAll();
+  setBarStatus(`已手動新增 ${ACTIVE} ${dateStr}（未寫入 CSV）· 記得撳「下載 CSV」`);
   return true;
 }
-async function reloadCsv() {
-  const csvRes = await fetch("data/googl_daily.csv", { cache: "no-store" });
+async function reloadCsv(sym = ACTIVE) {
+  const csvRes = await fetch(csvUrl(sym), { cache: "no-store" });
   if (!csvRes.ok) throw new Error("CSV 重新載入失敗");
-  DAILY = parseCSV(await csvRes.text());
-  D = computeAll(DAILY, budgetNow());
-  dirty = false;
-  document.body.classList.remove("has-update");
-  renderAll();
+  const slot = ensureSlot(sym);
+  slot.daily = parseCSV(await csvRes.text());
+  slot.D = computeAll(slot.daily, budgetNow());
+  slot.dirty = false;
+  if (sym === ACTIVE) {
+    DAILY = slot.daily;
+    D = slot.D;
+    dirty = false;
+    document.body.classList.remove("has-update");
+    renderAll();
+  }
+  renderWatchlist();
 }
 function applyUpdate(data) {
+  if (data.symbol && String(data.symbol).toUpperCase() !== ACTIVE) {
+    // 回應唔係當前 ticker：寫入對應 store，唔改畫面主狀態
+    const sym = String(data.symbol).toUpperCase();
+    const slot = ensureSlot(sym);
+    // 簡化：只更新 earnings 標記；完整 rows 合併略過（前端只 update 當前）
+    if (typeof data.nextEarnings === "string") slot.nextEarn = data.nextEarnings;
+    renderWatchlist();
+    return false;
+  }
   const rows = Array.isArray(data.rows) ? data.rows : [];
   let changed = false;
   for (const row of rows) {
@@ -513,19 +603,26 @@ function applyUpdate(data) {
     NEXT_EARN = data.nextEarnings;
     renderEarnings(NEXT_EARN);
   }
+  stashActive();
+  renderWatchlist();
   return changed;
 }
 async function pullLatest() {
   const btn = document.getElementById("btnUpdate");
   btn.disabled = true;
-  setBarStatus("正在向 yfinance 擷取最新數據…");
+  setBarStatus(`正在向 yfinance 擷取 ${ACTIVE}…`);
   try {
-    const res = await fetch("/api/update", { method: "POST", cache: "no-store" });
+    const res = await fetch("/api/update", {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbol: ACTIVE }),
+    });
     let data = {};
     try { data = await res.json(); } catch { /* 非 JSON 回應 */ }
     if (!res.ok || !data.ok) throw new Error(data.message || `伺服器回應 ${res.status}`);
     applyUpdate(data);
-    if (!(typeof data.nextEarnings === "string" && data.nextEarnings)) await loadEarnings();
+    if (!(typeof data.nextEarnings === "string" && data.nextEarnings)) await loadEarnings(ACTIVE);
     setBarStatus(data.message, "ok");
   } catch (err) {
     const offline = /Failed to fetch|NetworkError|Load failed/i.test(err.message);
@@ -567,21 +664,57 @@ if (gapPriceToggle) {
 
 /* ---------- 啟動 ---------- */
 function renderAll() {
+  if (!D) return;
+  renderWatchlist();
   renderKPI();
   chart1(); chart2(); chart3();
   chart4(D.curves, parseFloat(document.getElementById("budget").value) || 1000);
   renderTables();
+  renderEarnings(NEXT_EARN);
+}
+
+async function loadTicker(sym) {
+  const res = await fetch(csvUrl(sym), { cache: "no-store" });
+  if (!res.ok) throw new Error(`${sym} CSV 讀不到（${res.status}）`);
+  const slot = ensureSlot(sym);
+  slot.daily = parseCSV(await res.text());
+  slot.D = computeAll(slot.daily, budgetNow());
+  slot.dirty = false;
+  await loadEarnings(sym);
+  return slot;
 }
 
 async function boot() {
   try {
     sessionStorage.removeItem("googl_pin");
-    const res = await fetch("data/googl_daily.csv", { cache: "no-store" });
-    if (!res.ok) throw new Error("讀不到 CSV（" + res.status + "）");
-    DAILY = parseCSV(await res.text());
-    D = computeAll(DAILY, budgetNow());
+    let preferred = "GOOGL";
+    try {
+      const meta = await fetch("data/tickers.json", { cache: "no-store" });
+      if (meta.ok) {
+        const body = await meta.json();
+        if (Array.isArray(body.symbols) && body.symbols.length) {
+          TICKERS = body.symbols.map((s) => String(s).toUpperCase());
+        }
+        if (body.default) preferred = String(body.default).toUpperCase();
+      }
+    } catch { /* 用預設 watchlist */ }
+
+    const results = await Promise.all(TICKERS.map(async (sym) => {
+      try {
+        await loadTicker(sym);
+        return { sym, ok: true };
+      } catch (err) {
+        return { sym, ok: false, err };
+      }
+    }));
+    const failed = results.filter((r) => !r.ok);
+    const okList = results.filter((r) => r.ok).map((r) => r.sym);
+    if (!okList.length) throw new Error(failed.map((f) => f.err.message).join("; "));
+    adoptActive(okList.includes(preferred) ? preferred : okList[0]);
     renderAll();
-    await loadEarnings();
+    if (failed.length) {
+      setBarStatus(`已載入 ${okList.join(", ")}；失敗：${failed.map((f) => f.sym).join(", ")}`, "err");
+    }
   } catch (err) {
     setBarStatus("頁面啟動失敗：" + err.message, "err");
   }
@@ -596,7 +729,8 @@ document.getElementById("csvFile").addEventListener("change", (e) => {
       DAILY = parseCSV(rd.result);
       D = computeAll(DAILY, budgetNow());
       dirty = false;
-      document.getElementById("updateStatus").textContent = "";
+      stashActive();
+      document.getElementById("updateStatus").textContent = `已用上傳 CSV 更新 ${ACTIVE}`;
       renderAll();
     } catch (err) {
       alert("CSV 讀取失敗：" + err.message);
@@ -606,11 +740,14 @@ document.getElementById("csvFile").addEventListener("change", (e) => {
 });
 document.getElementById("btnSim").addEventListener("click", () => {
   D = computeAll(DAILY, budgetNow());
+  stashActive();
   chart4(D.curves, budgetNow());
 });
 
 window.addEventListener("beforeunload", (e) => {
-  if (dirty) { e.preventDefault(); e.returnValue = ""; }
+  stashActive();
+  const anyDirty = Object.values(STORE).some((s) => s.dirty);
+  if (anyDirty) { e.preventDefault(); e.returnValue = ""; }
 });
 
 boot();

@@ -3,22 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GOOGL 估值回測儀表板 — 股價 vs 估值 · 平貴週期 · 五分位 · 策略模擬</title>
+<title>估值回測儀表板 — GOOGL · MSFT · AVGO</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M3 17l5-6 4 4 6-8 3 3' stroke='%234c8dff' stroke-width='2' fill='none' stroke-linecap='round'/></svg>">
-<meta name="description" content="以 GOOGL 每日數據即時重算估值回測：股價 vs 估值、估值差時間序列、五分位前瞻回報、DCA 策略模擬。上傳新 CSV 即可每日更新。">
-<link rel="stylesheet" href="style.css?v=9">
+<meta name="description" content="多股票估值回測：GOOGL / MSFT / AVGO。股價 vs 估值、估值差、五分位前瞻回報、DCA 策略模擬。">
+<link rel="stylesheet" href="style.css?v=10">
 <script src="vendor/chart.umd.min.js"></script>
 </head>
 <body>
 
 <header class="topbar">
   <div class="brand">
-    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-label="GOOGL 估值儀表板">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-label="估值儀表板">
       <path d="M3 17l5-6 4 4 6-8 3 3" stroke-linecap="round" stroke-linejoin="round"/>
       <path d="M3 21h18" stroke-linecap="round" opacity=".35"/>
     </svg>
     <div>
-      <h1>GOOGL 估值回測儀表板</h1>
+      <h1 id="brandTitle">估值回測儀表板</h1>
       <p class="sub">5 年滾動中位數 P/E × 已公佈 EPS · 每日重算</p>
     </div>
   </div>
@@ -35,6 +35,8 @@
 </header>
 
 <main class="wrap">
+
+  <section class="watchlist" id="watchlist" aria-label="Watchlist" data-testid="watchlist"></section>
 
   <!-- KPI 狀態列 -->
   <section class="kpis" id="kpis">
@@ -174,6 +176,6 @@
   </div>
 </div>
 
-<script src="js/app.js?v=9"></script>
+<script src="js/app.js?v=10"></script>
 </body>
 </html>
