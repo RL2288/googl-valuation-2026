@@ -6,7 +6,7 @@
 <title>GOOGL 估值回測儀表板 — 股價 vs 估值 · 平貴週期 · 五分位 · 策略模擬</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M3 17l5-6 4 4 6-8 3 3' stroke='%234c8dff' stroke-width='2' fill='none' stroke-linecap='round'/></svg>">
 <meta name="description" content="以 GOOGL 每日數據即時重算估值回測：股價 vs 估值、估值差時間序列、五分位前瞻回報、DCA 策略模擬。上傳新 CSV 即可每日更新。">
-<link rel="stylesheet" href="style.css?v=8">
+<link rel="stylesheet" href="style.css?v=9">
 <script src="vendor/chart.umd.min.js"></script>
 </head>
 <body>
@@ -93,9 +93,20 @@
         <h2>第二課 · 估值差時間序列</h2>
         <p>gap = (估值 − 股價) ÷ 股價。0 軸以上 = 平，以下 = 貴。虛線係歷史 p25 / p75，週期以年為單位輪轉。</p>
       </div>
-      <span class="tag">平貴週期</span>
+      <div class="card-h-right">
+        <label class="toggle" data-testid="toggle-gap-price">
+          <input type="checkbox" id="toggleGapPrice">
+          <span>顯示股價</span>
+        </label>
+        <span class="tag">平貴週期</span>
+      </div>
     </header>
     <div class="chart-box"><canvas id="c2"></canvas></div>
+    <div class="legend-note" id="gapLegend">
+      <span><i class="dot" style="background:#3fb27f"></i>gap %（平）</span>
+      <span><i class="dot" style="background:#e5534b"></i>gap %（貴）</span>
+      <span id="gapPriceLegend" hidden><i class="dot" style="background:#4c8dff"></i>月度股價 Price（右軸）</span>
+    </div>
     <div class="cycle-table-wrap">
       <table class="cycle" id="cycleTable">
         <thead><tr><th>週期</th><th>期間</th><th>平均 gap</th><th>之後發生什麼</th></tr></thead>
@@ -163,6 +174,6 @@
   </div>
 </div>
 
-<script src="js/app.js?v=8"></script>
+<script src="js/app.js?v=9"></script>
 </body>
 </html>
