@@ -6,22 +6,10 @@
 <title>GOOGL 估值回測儀表板 — 股價 vs 估值 · 平貴週期 · 五分位 · 策略模擬</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M3 17l5-6 4 4 6-8 3 3' stroke='%234c8dff' stroke-width='2' fill='none' stroke-linecap='round'/></svg>">
 <meta name="description" content="以 GOOGL 每日數據即時重算估值回測：股價 vs 估值、估值差時間序列、五分位前瞻回報、DCA 策略模擬。上傳新 CSV 即可每日更新。">
-<link rel="stylesheet" href="style.css?v=6">
+<link rel="stylesheet" href="style.css?v=8">
 <script src="vendor/chart.umd.min.js"></script>
 </head>
-<body class="locked">
-
-<div id="pinGate" class="pin-gate" data-testid="pin-gate">
-  <form id="pinForm" class="pin-card" autocomplete="off">
-    <h1>GOOGL 估值回測</h1>
-    <p>輸入 PIN 解鎖頁面</p>
-    <input id="pinInput" type="password" inputmode="numeric" maxlength="16" placeholder="PIN" aria-label="PIN" data-testid="input-pin" autofocus>
-    <button type="submit" class="primary" data-testid="button-pin-unlock">解鎖</button>
-    <p id="pinStatus" class="pin-status" role="status"></p>
-  </form>
-</div>
-
-<div id="appShell" class="app-shell" hidden>
+<body>
 
 <header class="topbar">
   <div class="brand">
@@ -175,8 +163,6 @@
   </div>
 </div>
 
-</div><!-- /appShell -->
-
-<script src="js/app.js?v=7"></script>
+<script src="js/app.js?v=8"></script>
 </body>
 </html>
