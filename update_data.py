@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""用 yfinance 按一次請求補上 GOOGL 缺少的交易日。
+"""用 yfinance 按一次請求補上指定 ticker 缺少的交易日。
 
-非業績期 valuation 沿用上一行。trailingEps 相對 data/last_eps.json
+非業績期 valuation 沿用上一行。trailingEps 相對對應 eps json
 變動超過 1% 才按比率調整估值。同一日不會重複新增。
 
 上線環境（例如 /var/task）資料目錄可能唯讀：可寫時寫入 data/，
 否則改寫暫存目錄；連暫存都寫不入時仍回傳今次擷取結果畀前端套用。
 
     python update_data.py
+    python update_data.py MSFT
+    python update_data.py --all
 """
+from __future__ import annotations
+
 import csv
 import errno
 import io
@@ -21,7 +25,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 BUNDLE_DATA = ROOT / "data"
-SYMBOL = "GOOGL"
+DEFAULT_SYMBOL = "GOOGL"
+SYMBOLS = ("GOOGL", "MSFT", "AVGO")
 EPS_THRESHOLD = 0.01
 WRITE_ERRNOS = {errno.EROFS, errno.EACCES, errno.EPERM, errno.ENOENT}
 
@@ -29,6 +34,25 @@ _lock = threading.Lock()
 _dir_lock = threading.Lock()
 _runtime_dir = None
 _ephemeral = False
+
+
+def _norm_symbol(symbol: str | None) -> str:
+    sym = (symbol or DEFAULT_SYMBOL).strip().upper()
+    if sym not in SYMBOLS:
+        raise ValueError(f"不支援 {sym}，可用: {', '.join(SYMBOLS)}")
+    return sym
+
+
+def csv_name(symbol: str) -> str:
+    return f"{_norm_symbol(symbol).lower()}_daily.csv"
+
+
+def eps_name(symbol: str) -> str:
+    sym = _norm_symbol(symbol)
+    # GOOGL 沿用舊檔名，其餘用 {sym}_eps.json
+    if sym == "GOOGL":
+        return "last_eps.json"
+    return f"{sym.lower()}_eps.json"
 
 
 def _can_write(directory):
@@ -43,7 +67,8 @@ def _can_write(directory):
 
 
 def _seed(directory):
-    for name in ("googl_daily.csv", "last_eps.json"):
+    names = {csv_name(s) for s in SYMBOLS} | {eps_name(s) for s in SYMBOLS}
+    for name in names:
         dest = directory / name
         src = BUNDLE_DATA / name
         if not dest.exists() and src.exists():
@@ -84,12 +109,12 @@ def data_dir():
         return path
 
 
-def csv_path():
-    return data_dir() / "googl_daily.csv"
+def csv_path(symbol: str = DEFAULT_SYMBOL):
+    return data_dir() / csv_name(symbol)
 
 
-def eps_path():
-    return data_dir() / "last_eps.json"
+def eps_path(symbol: str = DEFAULT_SYMBOL):
+    return data_dir() / eps_name(symbol)
 
 
 def is_ephemeral():
@@ -97,35 +122,51 @@ def is_ephemeral():
     return _ephemeral
 
 
-def update_once():
+def update_once(symbol: str | None = None):
     if not _lock.acquire(blocking=False):
         return {"ok": False, "message": "上一次擷取尚未完成，請稍後再撳"}
     try:
-        return _update_once()
+        return _update_once(_norm_symbol(symbol))
+    except ValueError as exc:
+        return {"ok": False, "message": str(exc)}
     finally:
         _lock.release()
 
 
-def _update_once():
+def update_all():
+    results = []
+    for sym in SYMBOLS:
+        results.append(update_once(sym))
+    ok = all(r.get("ok") for r in results)
+    messages = [f"{r.get('symbol', '?')}: {r.get('message', '')}" for r in results]
+    return {
+        "ok": ok,
+        "message": " | ".join(messages),
+        "results": results,
+        "symbols": list(SYMBOLS),
+    }
+
+
+def _update_once(symbol: str):
     try:
-        rows = _load_rows()
+        rows = _load_rows(symbol)
     except (FileNotFoundError, ValueError) as exc:
-        return {"ok": False, "message": str(exc)}
+        return {"ok": False, "symbol": symbol, "message": str(exc)}
     if not rows:
-        return {"ok": False, "message": "CSV 沒有可用的數據列"}
+        return {"ok": False, "symbol": symbol, "message": "CSV 沒有可用的數據列"}
 
     last_date = rows[-1]["date"]
     last_val = rows[-1]["valuation"]
     start = (date.fromisoformat(last_date) + timedelta(days=1)).isoformat()
     try:
-        bars, ttm, next_earn = _fetch(start)
+        bars, ttm, next_earn = _fetch(symbol, start)
     except ModuleNotFoundError:
-        return {"ok": False, "message": "未安裝 yfinance。請先執行：pip install yfinance"}
+        return {"ok": False, "symbol": symbol, "message": "未安裝 yfinance。請先執行：pip install yfinance"}
     except Exception as exc:
-        return {"ok": False, "message": f"yfinance 擷取失敗：{exc}"}
+        return {"ok": False, "symbol": symbol, "message": f"yfinance 擷取失敗：{exc}"}
     bars = [(day, price) for day, price in bars if day > last_date]
 
-    prev = _load_eps()
+    prev = _load_eps(symbol)
     eps_changed = bool(prev and ttm and abs(ttm / prev - 1) > EPS_THRESHOLD)
     new_val = round(last_val * (ttm / prev), 4) if eps_changed else last_val
 
@@ -139,14 +180,15 @@ def _update_once():
         rows[-1] = {**rows[-1], "valuation": new_val}
 
     as_of = bars[-1][0] if bars else last_date
-    persisted = _persist(rows, ttm, as_of, next_earn)
+    persisted = _persist(symbol, rows, ttm, as_of, next_earn)
     ephemeral = is_ephemeral()
-    message = _message(last_date, last_val, new_val, bars, prev, ttm, eps_changed, next_earn)
+    message = _message(symbol, last_date, last_val, new_val, bars, prev, ttm, eps_changed, next_earn)
     if (bars or eps_changed) and (not persisted or ephemeral):
         message += "部署目錄唯讀，今次結果已回傳畫面；若要留底請撳「下載 CSV」。"
 
     return {
         "ok": True,
+        "symbol": symbol,
         "message": message,
         "appended": [bar[0] for bar in bars],
         "rows": new_rows,
@@ -173,8 +215,8 @@ def _bundle_or_runtime(name):
     return runtime
 
 
-def _load_rows():
-    path = _bundle_or_runtime("googl_daily.csv")
+def _load_rows(symbol: str):
+    path = _bundle_or_runtime(csv_name(symbol))
     if not path.exists():
         raise FileNotFoundError(f"找不到 {path.name}")
     rows = []
@@ -211,25 +253,24 @@ def _rows_to_csv(rows):
     return buf.getvalue()
 
 
-def _persist(rows, ttm, as_of, next_earn):
+def _persist(symbol: str, rows, ttm, as_of, next_earn):
     try:
-        path = csv_path()
+        path = csv_path(symbol)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(_rows_to_csv(rows), encoding="utf-8")
         if ttm or next_earn:
-            _save_eps(ttm, as_of, next_earn)
+            _save_eps(symbol, ttm, as_of, next_earn)
         return True
     except OSError as exc:
         if exc.errno in WRITE_ERRNOS or getattr(exc, "errno", None) is None:
             return False
-        # 其他 I/O 錯誤都唔阻礙前端套用今次結果
         return False
 
 
-def _fetch(start):
+def _fetch(symbol: str, start):
     import yfinance as yf
 
-    ticker = yf.Ticker(SYMBOL)
+    ticker = yf.Ticker(symbol)
     hist = ticker.history(start=start, auto_adjust=False, interval="1d")
     bars = []
     if hist is not None and not hist.empty and "Close" in hist.columns:
@@ -280,8 +321,8 @@ def _next_earnings(ticker):
     return min(upcoming).isoformat() if upcoming else None
 
 
-def _read_eps_file():
-    path = _bundle_or_runtime("last_eps.json")
+def _read_eps_file(symbol: str):
+    path = _bundle_or_runtime(eps_name(symbol))
     if not path.exists():
         return {}
     try:
@@ -291,33 +332,38 @@ def _read_eps_file():
     return data if isinstance(data, dict) else {}
 
 
-def _load_eps():
+def _load_eps(symbol: str):
     try:
-        value = float(_read_eps_file().get("ttmEps"))
+        value = float(_read_eps_file(symbol).get("ttmEps"))
     except (TypeError, ValueError):
         return None
     return value if value > 0 else None
 
 
-def _save_eps(ttm, as_of, next_earnings):
-    prev = _read_eps_file()
+def _save_eps(symbol: str, ttm, as_of, next_earnings):
+    prev = _read_eps_file(symbol)
     stored_ttm = round(ttm, 4) if ttm else prev.get("ttmEps")
     stored_earn = next_earnings or prev.get("nextEarnings")
     if stored_ttm is None and not stored_earn:
         return
-    path = eps_path()
+    path = eps_path(symbol)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "symbol": SYMBOL,
+        "symbol": symbol,
         "ttmEps": stored_ttm,
         "asOf": as_of,
         "nextEarnings": stored_earn,
         "source": "yfinance",
     }
+    # 保留 builder 寫入嘅方法欄位（若有）
+    for key in ("peMed5y", "valuation", "method"):
+        if key in prev and key not in payload:
+            payload[key] = prev[key]
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def _message(last_date, last_val, new_val, bars, prev, ttm, eps_changed, next_earn):
+def _message(symbol, last_date, last_val, new_val, bars, prev, ttm, eps_changed, next_earn):
+    prefix = f"[{symbol}] "
     if bars:
         span = bars[0][0] if len(bars) == 1 else f"{bars[0][0]} → {bars[-1][0]}"
         head = f"已補上 {span}，共 {len(bars)} 個交易日"
@@ -337,12 +383,21 @@ def _message(last_date, last_val, new_val, bars, prev, ttm, eps_changed, next_ea
     else:
         body = f"{head}。TTM EPS {ttm:.2f} 變動未超過 1%，估值沿用 {last_val:.4f}。"
     if next_earn:
-        return f"{body}下次業績公布 {next_earn}。"
-    return f"{body}下次業績公布日期暫時未有。"
+        return f"{prefix}{body}下次業績公布 {next_earn}。"
+    return f"{prefix}{body}下次業績公布日期暫時未有。"
 
 
 def main():
-    result = update_once()
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("symbol", nargs="?", help="Ticker，預設 GOOGL")
+    parser.add_argument("--all", action="store_true", help="更新全部 watchlist")
+    args = parser.parse_args()
+    if args.all:
+        result = update_all()
+    else:
+        result = update_once(args.symbol)
     print(result["message"] if result.get("message") else result)
     if not result.get("ok"):
         raise SystemExit(1)

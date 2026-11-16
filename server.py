@@ -7,8 +7,18 @@
 import json
 import os
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
-from update_data import ROOT, csv_path, eps_path, update_once
+from update_data import (
+    ROOT,
+    SYMBOLS,
+    csv_name,
+    csv_path,
+    eps_name,
+    eps_path,
+    update_all,
+    update_once,
+)
 
 HOST = os.environ.get("GOOGL_HOST", "127.0.0.1")
 PORT = int(os.environ.get("GOOGL_PORT", "8765"))
@@ -47,12 +57,41 @@ class Handler(SimpleHTTPRequestHandler):
             return b"", None
         return self.rfile.read(length), None
 
+    def _data_file(self, path: str):
+        """對應 /data/{file} → runtime 可寫路徑（支援 ephemeral）。"""
+        if not path.startswith("/data/"):
+            return None
+        name = path[len("/data/") :]
+        if "/" in name or "\\" in name or ".." in name:
+            return None
+        known = {csv_name(s) for s in SYMBOLS} | {eps_name(s) for s in SYMBOLS}
+        if name not in known:
+            return None
+        # 由檔名反推 symbol
+        for sym in SYMBOLS:
+            if name == csv_name(sym):
+                return csv_path(sym), "text/csv; charset=utf-8"
+            if name == eps_name(sym):
+                return eps_path(sym), "application/json; charset=utf-8"
+        return None
+
     def do_GET(self):
-        path = self.path.split("?", 1)[0]
-        served = {
-            "/data/googl_daily.csv": (csv_path(), "text/csv; charset=utf-8"),
-            "/data/last_eps.json": (eps_path(), "application/json; charset=utf-8"),
-        }.get(path)
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path == "/api/tickers":
+            self._json(
+                200,
+                {
+                    "ok": True,
+                    "symbols": list(SYMBOLS),
+                    "files": {
+                        s: {"csv": f"/data/{csv_name(s)}", "eps": f"/data/{eps_name(s)}"}
+                        for s in SYMBOLS
+                    },
+                },
+            )
+            return
+        served = self._data_file(path)
         if served is None:
             return super().do_GET()
         file_path, content_type = served
@@ -66,16 +105,38 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        path = self.path.split("?", 1)[0]
+        parsed = urlparse(self.path)
+        path = parsed.path
         raw, err = self._read_body()
         if err:
             self._json(413 if "太大" in err else 400, {"ok": False, "message": err})
             return
-        if path != "/api/update":
+        if path not in {"/api/update", "/api/update-all"}:
             self.send_error(404)
             return
+
+        symbol = None
+        body = {}
+        if raw:
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._json(400, {"ok": False, "message": "JSON 無效"})
+                return
+            if not isinstance(body, dict):
+                self._json(400, {"ok": False, "message": "JSON 要係物件"})
+                return
+            symbol = body.get("symbol")
+
+        qs = parse_qs(parsed.query or "")
+        if not symbol and qs.get("symbol"):
+            symbol = qs["symbol"][0]
+
         try:
-            result = update_once()
+            if path == "/api/update-all" or (isinstance(symbol, str) and symbol.strip().upper() == "ALL"):
+                result = update_all()
+            else:
+                result = update_once(symbol)
             status = 200 if result.get("ok") else 502
         except Exception as exc:
             result = {"ok": False, "message": f"更新失敗：{exc}"}
@@ -91,8 +152,8 @@ class Server(ThreadingHTTPServer):
 
 def main():
     httpd = Server((HOST, PORT), Handler)
-    print(f"GOOGL dashboard  http://{HOST}:{PORT}/")
-    print("撳「擷取最新數據」先會向 yfinance 要一次。Ctrl+C 結束。")
+    print(f"Valuation dashboard  http://{HOST}:{PORT}/")
+    print(f"Watchlist: {', '.join(SYMBOLS)}。撳「擷取最新數據」先會向 yfinance 要一次。Ctrl+C 結束。")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

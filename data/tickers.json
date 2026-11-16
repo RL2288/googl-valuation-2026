@@ -1,0 +1,5 @@
+{
+  "symbols": ["GOOGL", "MSFT", "AVGO"],
+  "default": "GOOGL",
+  "method": "5Y rolling median PE × TTM diluted EPS"
+}
