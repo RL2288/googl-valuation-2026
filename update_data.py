@@ -126,9 +126,10 @@ def update_once(symbol: str | None = None):
     if not _lock.acquire(blocking=False):
         return {"ok": False, "message": "上一次擷取尚未完成，請稍後再撳"}
     try:
-        return _update_once(_norm_symbol(symbol))
+        # CLI 無參數時仍預設 GOOGL；API 應先傳明確 symbol
+        return _update_once(_norm_symbol(symbol if symbol is not None else DEFAULT_SYMBOL))
     except ValueError as exc:
-        return {"ok": False, "message": str(exc)}
+        return {"ok": False, "symbol": (symbol or "").upper() or None, "message": str(exc)}
     finally:
         _lock.release()
 
@@ -162,8 +163,8 @@ def _update_once(symbol: str):
         bars, ttm, next_earn = _fetch(symbol, start)
     except ModuleNotFoundError:
         return {"ok": False, "symbol": symbol, "message": "未安裝 yfinance。請先執行：pip install yfinance"}
-    except Exception as exc:
-        return {"ok": False, "symbol": symbol, "message": f"yfinance 擷取失敗：{exc}"}
+    except Exception:
+        return {"ok": False, "symbol": symbol, "message": "yfinance 擷取失敗，請稍後再試"}
     bars = [(day, price) for day, price in bars if day > last_date]
 
     prev = _load_eps(symbol)
