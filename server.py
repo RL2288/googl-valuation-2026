@@ -116,7 +116,6 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         symbol = None
-        body = {}
         if raw:
             try:
                 body = json.loads(raw.decode("utf-8") or "{}")
@@ -126,20 +125,32 @@ class Handler(SimpleHTTPRequestHandler):
             if not isinstance(body, dict):
                 self._json(400, {"ok": False, "message": "JSON 要係物件"})
                 return
-            symbol = body.get("symbol")
+            raw_sym = body.get("symbol")
+            if isinstance(raw_sym, str) and raw_sym.strip():
+                symbol = raw_sym.strip()
 
+        # Query string 優先：hosted 環境有時 POST body 會丟，query 較穩
         qs = parse_qs(parsed.query or "")
-        if not symbol and qs.get("symbol"):
-            symbol = qs["symbol"][0]
+        if qs.get("symbol") and qs["symbol"][0].strip():
+            symbol = qs["symbol"][0].strip()
 
         try:
-            if path == "/api/update-all" or (isinstance(symbol, str) and symbol.strip().upper() == "ALL"):
+            if path == "/api/update-all" or (isinstance(symbol, str) and symbol.upper() == "ALL"):
                 result = update_all()
+            elif not symbol:
+                self._json(
+                    400,
+                    {
+                        "ok": False,
+                        "message": "請指定 symbol（例如 /api/update?symbol=MSFT）",
+                    },
+                )
+                return
             else:
                 result = update_once(symbol)
             status = 200 if result.get("ok") else 502
         except Exception as exc:
-            result = {"ok": False, "message": f"更新失敗：{exc}"}
+            result = {"ok": False, "message": "更新失敗，請稍後再試"}
             status = 500
         self._json(status, result)
 

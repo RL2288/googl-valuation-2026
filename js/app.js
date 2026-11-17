@@ -554,13 +554,8 @@ async function reloadCsv(sym = ACTIVE) {
   renderWatchlist();
 }
 function applyUpdate(data) {
+  // 若回應帶 symbol，必須對準當前 ACTIVE（錯股唔好 silently 套用）
   if (data.symbol && String(data.symbol).toUpperCase() !== ACTIVE) {
-    // 回應唔係當前 ticker：寫入對應 store，唔改畫面主狀態
-    const sym = String(data.symbol).toUpperCase();
-    const slot = ensureSlot(sym);
-    // 簡化：只更新 earnings 標記；完整 rows 合併略過（前端只 update 當前）
-    if (typeof data.nextEarnings === "string") slot.nextEarn = data.nextEarnings;
-    renderWatchlist();
     return false;
   }
   const rows = Array.isArray(data.rows) ? data.rows : [];
@@ -610,19 +605,31 @@ function applyUpdate(data) {
 async function pullLatest() {
   const btn = document.getElementById("btnUpdate");
   btn.disabled = true;
-  setBarStatus(`正在向 yfinance 擷取 ${ACTIVE}…`);
+  if (!ACTIVE) {
+    setBarStatus("尚未選好股票，請先撳 watchlist", "err");
+    btn.disabled = false;
+    return;
+  }
+  const sym = ACTIVE;
+  setBarStatus(`正在向 yfinance 擷取 ${sym}…`);
   try {
-    const res = await fetch("/api/update", {
+    // query + body 雙保險：hosted 有時會丟 POST body
+    const res = await fetch(`/api/update?symbol=${encodeURIComponent(sym)}`, {
       method: "POST",
       cache: "no-store",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ symbol: ACTIVE }),
+      body: JSON.stringify({ symbol: sym }),
     });
     let data = {};
     try { data = await res.json(); } catch { /* 非 JSON 回應 */ }
     if (!res.ok || !data.ok) throw new Error(data.message || `伺服器回應 ${res.status}`);
+    const got = data.symbol ? String(data.symbol).toUpperCase() : "";
+    if (got && got !== sym) {
+      throw new Error(`伺服器回咗 ${got}，唔係 ${sym}；請再試一次`);
+    }
+    if (ACTIVE !== sym) adoptActive(sym);
     applyUpdate(data);
-    if (!(typeof data.nextEarnings === "string" && data.nextEarnings)) await loadEarnings(ACTIVE);
+    if (!(typeof data.nextEarnings === "string" && data.nextEarnings)) await loadEarnings(sym);
     setBarStatus(data.message, "ok");
   } catch (err) {
     const offline = /Failed to fetch|NetworkError|Load failed/i.test(err.message);
